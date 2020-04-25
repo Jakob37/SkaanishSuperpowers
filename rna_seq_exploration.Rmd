@@ -66,22 +66,21 @@ non_tissue_design_data <- design_seq_df[, !(colnames(design_seq_df) %in% c(pancr
   mutate(id=paste("patient", seq_len(n()), sep="_")) %>% 
   dplyr::select(id, everything())
 
+pancreas_fat_cut <- 10
 pancreas_design_distinct <- cbind(
   non_tissue_design_data, 
   design_seq_df[, pancreas_cols] %>% 
     `colnames<-`(tissue_cols_names) %>% mutate(source="pancreas")) %>% 
   distinct(sampid, .keep_all=TRUE) %>%
-  mutate(over_median_fat = fat_percentage > median(fat_percentage))
+  mutate(over_fat_cutoff = fat_percentage > median(fat_percentage))
 
+liver_fat_cut <- 35
 liver_design_distinct <- cbind(
   non_tissue_design_data, design_seq_df[, liver_cols] %>% 
     `colnames<-`(tissue_cols_names) %>% 
     mutate(source="liver")) %>%
   distinct(sampid, .keep_all=TRUE) %>%
-  mutate(over_median_fat = fat_percentage > median(fat_percentage))
-
-duplicated(pancreas_design_distinct$sampid)
-duplicated(liver_design_distinct$sampid)
+  mutate(over_fat_cutoff = fat_percentage > median(fat_percentage))
 
 ddf <- rbind(pancreas_design_distinct, liver_design_distinct)
 
@@ -114,7 +113,17 @@ ddf_all
 
 ddf <- ddf_all %>% filter(sampid %in% colnames(rdf))
 
-
+plt <- ggpubr::ggarrange(
+  ddf %>% 
+    filter(source == "liver") %>%
+    ggplot(aes(x=fat_percentage, fill=fat_percentage<35)) + geom_histogram() + xlim(0, 100) + ggtitle("Liver fat percentage"),
+  ddf %>%
+    filter(source == "pancreas") %>%
+    ggplot(aes(x=fat_percentage, fill=fat_percentage<10)) + geom_histogram() + xlim(0, 100) + ggtitle("Pancreas fat percentage"),
+  nrow=2, ncol=1
+)
+plt
+ggsave(plt, filename = "output/fat_percentages_high.png")
 ```
 
 ### Overview the input data
@@ -155,22 +164,21 @@ make_deseq_data <- function(rdf, sample_cols) {
 
 make_deseq_design <- function (ddf_raw, sample_col) {
   ddf_dataframe <- ddf_raw %>% as.data.frame()
-  row.names(ddf_dataframe) <- ddf[[sample_col]]
+  row.names(ddf_dataframe) <- ddf_raw[[sample_col]]
   ddf_dataframe <- ddf_dataframe[sort(rownames(ddf_dataframe)), ]
   ddf_dataframe
 }
 ```
 
 ```{r}
-ddf$tissue_highfat <- paste(ddf$source, ddf$over_median_fat, sep="_")
-
-ddf_dataframe <- make_deseq_design(ddf, "sampid")
+ddf$tissue_highfat <- paste(ddf$source, ddf$over_fat_cutoff, sep="_")
+ddf_dataframe <- make_deseq_design(ddf %>% filter(!is_validation_sample), "sampid")
 sdf_dataframe <- make_deseq_data(rdf, rownames(ddf_dataframe))
 
 dds <- DESeqDataSetFromMatrix(
   countData = sdf_dataframe,
   colData = ddf_dataframe,
-  design = ~tissue_highfat
+  design = ~tissue_highfat + sex
 )
 
 dds_out <- DESeq(dds)
@@ -178,18 +186,30 @@ dds_out <- DESeq(dds)
 resultsNames(dds_out)
 
 res_liver <- results(dds_out, contrast=c("tissue_highfat", "liver_TRUE", "liver_FALSE"))
-res_liver_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "liver_TRUE", "liver_FALSE"), res=res_liver, type="apeglm")
+res_liver_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "liver_TRUE", "liver_FALSE"), res=res_liver)
 
 res_pancreas <- results(dds_out, contrast=c("tissue_highfat", "pancreas_TRUE", "pancreas_FALSE"))
-res_pancreas_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "pancreas_TRUE", "pancreas_FALSE"), res=res_pancreas, type="apeglm")
+res_pancreas_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "pancreas_TRUE", "pancreas_FALSE"), res=res_pancreas)
 ```
 
 ## Writing results prepared for OmicLoupe
 
 ```{r}
+library(mygene)
+
+all_genes <- getGenes(out_rdf$Name %>% gsub("\\..", "", .))
+all_genes_descr_only <- all_genes %>% data.frame() %>% dplyr::select(query, name)
+all_genes_descr_only
+
 vsd <- vst(dds_out, blind=FALSE)
 
-adf <- rdf %>% dplyr::select(c("Name", "Description"))
+adf
+
+adf <- rdf %>% dplyr::select(c("Name", "Description")) %>% 
+  dplyr::mutate(query=gsub("\\..", "", Name)) %>%
+  inner_join(all_genes_descr_only, by="query") %>%
+  dplyr::select(Name, Description, Annot=name) %>%
+  distinct(Name, .keep_all = TRUE)
 sdf <- rdf %>% dplyr::select(-one_of(c("Name", "Description")))
 
 out_rdf <- cbind(
@@ -212,6 +232,24 @@ write_tsv(ddf %>% dplyr::select(sampid, everything()), path = "output/out_rdf.de
 
 out_rdf
 ```
+
+## Writing shortlists
+
+```{r}
+# library(org.Hs.eg.db)
+# library(EnsDb.Hsapiens.v79)
+
+
+liver_shortlist <- out_rdf %>% dplyr::filter(liver.padj < 0.05 & abs(liver.log2FoldChange) > 1) %>% arrange(liver.pvalue)
+panc_shortlist <- out_rdf %>% dplyr::filter(panc.padj < 0.05 & abs(panc.log2FoldChange) > 1) %>% arrange(panc.pvalue)
+
+liver_shortlist
+
+write_tsv(liver_shortlist, path = "output/liver_shortlist.tsv")
+write_tsv(panc_shortlist, path = "output/panc_shortlist.tsv")
+
+```
+
 
 # Explorative visuals
 
