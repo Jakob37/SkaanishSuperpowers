@@ -13,6 +13,9 @@ quiet <- suppressPackageStartupMessages
 quiet(library(tidyverse))
 quiet(library(openxlsx))
 quiet(library(DESeq2))
+quiet(library(janitor))
+
+theme_set(theme_classic())
 ```
 
 ## Util functions
@@ -34,69 +37,149 @@ pick <- function(rdf, target_col, as_char=FALSE) {
 
 ### Parse from raw data
 
-```{r eval=FALSE}
-read_tsv("")
+#### Setup design
 
-design_seq_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat_seq.xlsx")
+```{r}
+design_seq_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat_seq.xlsx") %>% janitor::clean_names()
 design_pat_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat.xlsx")
-raw_df <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip = 2)
-
-design_seq_df$SAMPID_liver %in% colnames(raw_df)
-design_seq_df$SAMPID_pancreas %in% colnames(raw_df)
-# design_seq_df$Subject.ID %in% trimmed_sample_ids)
-
-colnames(design_seq_df)
 
 pancreas_cols <- colnames(design_seq_df[grepl("_pancreas$", colnames(design_seq_df))])
 liver_cols <- colnames(design_seq_df[grepl("_liver$", colnames(design_seq_df))])
 tissue_cols_names <- pancreas_cols %>% gsub("_pancreas", "", .)
 other_cols <- colnames(design_seq_df)[!colnames(design_seq_df) %in% c(pancreas_cols, liver_cols)]
 non_tissue_design_data <- design_seq_df[, !(colnames(design_seq_df) %in% c(pancreas_cols, liver_cols))] %>%
-  mutate(ID=paste("patient", seq_len(n()), sep="_")) %>% 
-  dplyr::select(ID, everything())
+  mutate(id=paste("patient", seq_len(n()), sep="_")) %>% 
+  dplyr::select(id, everything())
 
-non_tissue_design_data
+pancreas_design_all <- cbind(non_tissue_design_data, design_seq_df[, pancreas_cols] %>% 
+                           `colnames<-`(tissue_cols_names) %>% 
+                           mutate(source="pancreas"))
+liver_design_all <- cbind(non_tissue_design_data, design_seq_df[, liver_cols] %>% 
+                        `colnames<-`(tissue_cols_names) %>% 
+                        mutate(source="liver"))
 
-pancreas_cols
-liver_cols
+
+pancreas_design_all
 
 ddf <- rbind(
-  cbind(non_tissue_design_data, design_seq_df[, pancreas_cols] %>% `colnames<-`(tissue_cols_names) %>% mutate(source="pancreas")),
-  cbind(non_tissue_design_data, design_seq_df[, liver_cols] %>% `colnames<-`(tissue_cols_names) %>% mutate(source="liver"))
+  pancreas_design_all %>% distinct(sampid, .keep_all=TRUE),
+  liver_design_all %>% distinct(sampid, .keep_all=TRUE)
 )
+
+ddf
+
+write_tsv(ddf, path="data/count_matrix_target_subset.design.tsv")
+```
+
+#### Setup data
+
+```{r eval=FALSE}
+raw_df <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip = 2)
+
+
+length(unique(ddf$SAMPID))
+length(ddf$SAMPID)
 
 rdf <- raw_df %>% dplyr::select(Name, Description, any_of(ddf$SAMPID))
 write_tsv(rdf, path = "data/count_matrix_target_subset.tsv.gz")
-write_tsv(ddf, path="data/count_matrix_target_subset.design.tsv")
 
 ```
 
 ### Parse from preparsed data
 
-Note that 25 out of 204 samples does not seem to be present in the count matrix.
-
 ```{r}
 rdf <- read_tsv("data/count_matrix_target_subset.tsv.gz")
-ddf <- read_tsv("data/count_matrix_target_subset.design.tsv")
+ddf_all <- read_tsv("data/count_matrix_target_subset.design.tsv")
 
-head(rdf)
-head(ddf)
+ddf <- ddf_all %>% filter(sampid %in% colnames(rdf))
 
 
+```
+
+### Overview the input data
+
+Note that 25 out of 204 samples does not seem to be present in the count matrix.
+
+Four are missing in both types of tissues.
+
+There seem to be duplicate IDs, but that could be due to multiple tissue sample taken from the same person of one type of tissue.
+
+So this could maybe safely be omitted?
+
+But need to think carefully about the statistics!
+
+```{r}
 message("Of all samples, how many are present in count data")
-table((ddf %>% pick(SAMPID)) %in% colnames(rdf))
+table((ddf_all %>% pick(sampid)) %in% colnames(rdf))
 message("Of liver samples, how many are present in count data")
-table((ddf %>% filter(source == "pancreas") %>% pick(SAMPID)) %in% colnames(rdf))
+present_in_liver <- (ddf_all %>% filter(source == "pancreas") %>% pick(sampid)) %in% colnames(rdf)
+table(present_in_liver)
 message("Of pancreas samples, how many are present in count data")
-table((ddf %>% filter(source == "liver") %>% pick(SAMPID)) %in% colnames(rdf))
+present_in_pancreas <- (ddf_all %>% filter(source == "liver") %>% pick(sampid)) %in% colnames(rdf)
+table(present_in_pancreas)
+message("Of these, how many are missing simultaneously in both?")
+table(present_in_liver | present_in_pancreas)
+```
+
+# Putting fat thresholds
+
+```{r}
+pancreas_cut <- 20
+liver_cut <- 25
+
+liver_median <- ddf_all %>% dplyr::filter(source == "liver") %>% pick(fat_percentage) %>% median()
+pancreas_median <- ddf_all %>% dplyr::filter(source == "pancreas") %>% pick(fat_percentage) %>% median()
+
+ddf_all$over_median_fat <- rbind(ddf_all %>% dplyr::filter(source == "liver"))
+
+# ddf_all %>% ggplot(aes(x=fat_percentage)) + geom_histogram(bins=100) + facet_grid(source~.)
 ```
 
 # DESeq2 analysis
 
+## Utility functions
+
 ```{r}
+make_deseq_data <- function(rdf, sample_cols) {
+  sdf_dataframe <- rdf %>% dplyr::select(all_of(sorted(sample_cols))) %>% as.data.frame()
+  rownames(sdf_dataframe) <- rdf$Name
+  sdf_dataframe
+}
+
+make_deseq_design <- function (ddf_raw, sample_col) {
+  ddf_dataframe <- ddf_raw %>% as.data.frame()
+  row.names(ddf_dataframe) <- ddf[[sample_col]]
+  ddf_dataframe <- ddf_dataframe[sort(rownames(ddf_dataframe)), ]
+  ddf_dataframe
+}
+```
+
+
+```{r}
+ddf_dataframe
+
+
 dds <- DESeqDataSetFromMatrix(
-  countData=
+  countData = sdf_dataframe,
+  colData = ddf_dataframe,
+  design = ~source + sex
 )
+
+dds_out <- DESeq(dds)
+
+resultsNames(dds_out)
+
+
+
+
+res_panc_liver <- results(dds_out, name="source_pancreas_vs_liver")
+res_sex <- results(dds_out, name="sex_male_vs_female")
+
+res_panc_liver
+
+res_panc_liver %>% data.frame() %>% ggplot(aes(x=pvalue)) + geom_histogram(bins=100, na.rm = TRUE)
+res_sex %>% data.frame() %>% ggplot(aes(x=pvalue)) + geom_histogram(bins=100, na.rm = TRUE)
+res %>% data.frame() %>% filter(padj < 0.05)
 ```
 
 
