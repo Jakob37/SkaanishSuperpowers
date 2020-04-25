@@ -1,0 +1,101 @@
+---
+title: "R Notebook"
+output: html_notebook
+#editor_options:
+#  chunk_output_type: console
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r}
+library("tidyverse")
+library("caret")
+```
+
+
+```{r}
+dt1 <- readxl::read_xlsx("GTEx_pancreas_liver_images_liverfat_pancreasfat.xlsx")
+```
+
+
+```{r}
+head(dt1)
+```
+
+
+```{r}
+panc_path <- lapply(dt1$Pathology.Categories_pancreas, function(x) {
+  unlist(str_split(x, ", ")) }) %>% unlist() %>% unique() %>% subset(!is.na(.))
+panc_categories_wide <- sapply(panc_path, function(x) {
+  grepl(x, dt1$Pathology.Categories_pancreas)
+  }) %>%
+  as.data.frame() %>%
+  rename_all(., function(x) paste(x, "pancreas", sep = "_"))
+
+liver_path <- lapply(dt1$Pathology.Categories_liver, function(x) {
+  unlist(str_split(x, ", ")) }) %>% unlist() %>% unique() %>% subset(!is.na(.))
+liver_categories_wide <- sapply(liver_path, function(x) {
+  grepl(x, dt1$Pathology.Categories_liver)
+  }) %>%
+  as.data.frame() %>%
+  rename_all(., function(x) paste(x, "liver", sep = "_"))
+```
+
+
+```{r}
+dt1_pathology_wide <- bind_cols(dt1,
+                                panc_categories_wide,
+                                liver_categories_wide)
+```
+
+
+### ML Model
+#### Predict pancreas fat
+
+```{r}
+panc_dt <- bind_cols(dt1 %>%
+                       select(!contains("liver")) %>%
+                       select(-c("Subject.ID",
+                       "Tissue.Sample.ID_pancreas",
+                       "Pathology.Categories_pancreas",
+                       "Pathology.Notes_pancreas")),
+                     panc_categories_wide)
+
+anyNA(panc_dt)
+  
+summary(panc_dt$Fat.Percentage_pancreas)
+```
+
+
+```{r}
+set.seed(2020)
+trainIndex <- caret::createDataPartition(panc_dt$Fat.Percentage_pancreas,
+                                         p = .8, 
+                                         list = FALSE, 
+                                         times = 1)
+
+train_dt <- panc_dt[trainIndex[,1], ]
+test_dt  <- panc_dt[-trainIndex[,1], ]
+```
+
+
+
+```{r}
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 3)
+#                           repeats = 10)
+
+train_x <- train_dt %>% select(-Fat.Percentage_pancreas) %>%
+  mutate_all(as.factor) %>% as.data.frame()
+train_y <- train_dt %>% pull(Fat.Percentage_pancreas)
+
+set.seed(2021)
+my_model <- train(train_x,
+                  train_y)
+
+#      method = "glmnet",
+#      trControl = fitControl)
+      #preProc = c("center","scale"),
+#      tuneGrid = expand.grid(alpha = 1, lambda = 0))
+```
+
