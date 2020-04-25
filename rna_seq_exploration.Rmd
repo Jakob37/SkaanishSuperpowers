@@ -8,48 +8,95 @@ output: html_notebook
 ## Load libraries
 
 ```{r}
-library(tidyverse)
-library(openxlsx)
+quiet <- suppressPackageStartupMessages
+
+quiet(library(tidyverse))
+quiet(library(openxlsx))
+quiet(library(DESeq2))
+```
+
+## Util functions
+
+```{r}
+pick <- function(rdf, target_col, as_char=FALSE) {
+  target_col <- enquo(target_col)
+  raw_col <- rdf %>% dplyr::select(!!target_col) %>% unlist() %>% unname()
+  if (as_char) {
+    raw_col %>% as.character()
+  }
+  else {
+    raw_col
+  }
+}
 ```
 
 ## Load data
 
-```{r}
+### Parse from raw data
+
+```{r eval=FALSE}
 read_tsv("")
 
 design_seq_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat_seq.xlsx")
 design_pat_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat.xlsx")
 raw_df <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip = 2)
 
-colnames(design_seq_df)
-colnames(design_pat_df)
-
-dim(design_seq_df)
-dim(design_pat_df)
-
-head(design_seq_df)
-
-colnames(raw_df)
-
 design_seq_df$SAMPID_liver %in% colnames(raw_df)
 design_seq_df$SAMPID_pancreas %in% colnames(raw_df)
 # design_seq_df$Subject.ID %in% trimmed_sample_ids)
 
+colnames(design_seq_df)
 
-design_seq_df
+pancreas_cols <- colnames(design_seq_df[grepl("_pancreas$", colnames(design_seq_df))])
+liver_cols <- colnames(design_seq_df[grepl("_liver$", colnames(design_seq_df))])
+tissue_cols_names <- pancreas_cols %>% gsub("_pancreas", "", .)
+other_cols <- colnames(design_seq_df)[!colnames(design_seq_df) %in% c(pancreas_cols, liver_cols)]
+non_tissue_design_data <- design_seq_df[, !(colnames(design_seq_df) %in% c(pancreas_cols, liver_cols))] %>%
+  mutate(ID=paste("patient", seq_len(n()), sep="_")) %>% 
+  dplyr::select(ID, everything())
 
-colnames(raw_df)[-c(1:2)]
-trimmed_sample_ids <- colnames(raw_df)[-c(1:2)] %>% gsub("-\\d\\d\\d\\d-SM-.*", "", .)
+non_tissue_design_data
 
-dim(raw_df)
+pancreas_cols
+liver_cols
 
-sampid_liver_df <- raw_df %>% dplyr::select(any_of(design_seq_df$SAMPID_liver))
+ddf <- rbind(
+  cbind(non_tissue_design_data, design_seq_df[, pancreas_cols] %>% `colnames<-`(tissue_cols_names) %>% mutate(source="pancreas")),
+  cbind(non_tissue_design_data, design_seq_df[, liver_cols] %>% `colnames<-`(tissue_cols_names) %>% mutate(source="liver"))
+)
+
+rdf <- raw_df %>% dplyr::select(Name, Description, any_of(ddf$SAMPID))
+write_tsv(rdf, path = "data/count_matrix_target_subset.tsv.gz")
+write_tsv(ddf, path="data/count_matrix_target_subset.design.tsv")
+
+```
+
+### Parse from preparsed data
+
+Note that 25 out of 204 samples does not seem to be present in the count matrix.
+
+```{r}
+rdf <- read_tsv("data/count_matrix_target_subset.tsv.gz")
+ddf <- read_tsv("data/count_matrix_target_subset.design.tsv")
+
+head(rdf)
+head(ddf)
+
+
+message("Of all samples, how many are present in count data")
+table((ddf %>% pick(SAMPID)) %in% colnames(rdf))
+message("Of liver samples, how many are present in count data")
+table((ddf %>% filter(source == "pancreas") %>% pick(SAMPID)) %in% colnames(rdf))
+message("Of pancreas samples, how many are present in count data")
+table((ddf %>% filter(source == "liver") %>% pick(SAMPID)) %in% colnames(rdf))
 ```
 
 # DESeq2 analysis
 
 ```{r}
-sampid_liver_df
+dds <- DESeqDataSetFromMatrix(
+  countData=
+)
 ```
 
 
