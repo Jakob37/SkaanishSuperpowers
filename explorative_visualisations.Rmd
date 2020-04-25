@@ -1,0 +1,28 @@
+---
+title: "Explorative visualisations"
+output: html_notebook
+---
+
+
+```{r}
+require(ggplot2)
+require(ggbeeswarm)
+
+setwd('/home/dimitris/Documents/playground/hackathon-april2020')
+datafile <- "/home/dimitris/Documents/playground/hackathon-april2020/GTEx_pancreas_liver_images_liverfat_pancreasfat.csv"
+df <- read.csv(datafile, sep = '\t', header = TRUE)
+
+liver <- strsplit(as.character(df$Pathology.Categories_liver), ',')
+liver <- data.frame(Pathology.Categories_liver=unlist(liver), Fat.Percentage_liver=rep(df$Fat.Percentage_liver, lengths(liver)))
+liver$Pathology.Categories_liver <- gsub('\\s+', '', liver$Pathology.Categories_liver)
+ggplot(liver, aes(x=Pathology.Categories_liver, y=Fat.Percentage_liver)) + geom_beeswarm() + theme(axis.text.x = element_text(angle=90, vjust=-0.5))
+
+pancreas <- strsplit(as.character(df$Pathology.Categories_pancreas), ',')
+pancreas <- data.frame(Pathology.Categories_pancreas=unlist(pancreas), Fat.Percentage_pancreas=rep(df$Fat.Percentage_pancreas, lengths(pancreas)))
+pancreas$Pathology.Categories_pancreas <- gsub('\\s+', '', pancreas$Pathology.Categories_pancreas)
+ggplot(pancreas, aes(x=Pathology.Categories_pancreas, y=Fat.Percentage_pancreas)) + geom_beeswarm() + theme(axis.text.x = element_text(angle=90, vjust=-0.5))
+
+ggplot(df, aes(x=Fat.Percentage_pancreas, y=Fat.Percentage_liver)) + geom_point() +
+  geom_smooth(method=lm)
+```
+
