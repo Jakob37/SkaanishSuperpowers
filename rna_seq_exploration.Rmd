@@ -88,23 +88,31 @@ liver_design_distinct <- cbind(
 ddf <- rbind(pancreas_design_distinct, liver_design_distinct)
 
 message("Any duplicated samples present: ", all(duplicated(ddf$sampid)))
-
-write_tsv(ddf, path="data/count_matrix_target_subset.design.tsv")
 ```
 
-#### Setup data
+#### Parse further sample information
+
+```{r}
+sample_attributes <- read_tsv("data/GTEx_Analysis_v8_Annotations_SampleAttributesDS.txt") %>% janitor::clean_names()
+extended_ddf <- ddf %>% inner_join(sample_attributes, by="sampid")
+write_tsv(extended_ddf, path="data/count_matrix_target_subset.design.tsv")
+
+
+```
+
+#### Include the sample information matrix
 
 ```{r eval=FALSE}
 raw_df <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gct", skip = 2)
-
 
 length(unique(ddf$SAMPID))
 length(ddf$SAMPID)
 
 rdf <- raw_df %>% dplyr::select(Name, Description, any_of(ddf$sampid))
 write_tsv(rdf, path = "data/count_matrix_target_subset.tsv.gz")
-
 ```
+
+
 
 ### Parse from preparsed data
 
@@ -114,7 +122,7 @@ ddf_all <- read_tsv("data/count_matrix_target_subset.design.tsv") %>% arrange(sa
 
 ddf_all
 
-ddf <- ddf_all %>% filter(sampid %in% colnames(rdf))
+ddf <- ddf_all %>% dplyr::filter(sampid %in% colnames(rdf))
 
 plt <- ggpubr::ggarrange(
   ddf %>% 
