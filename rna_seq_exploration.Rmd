@@ -37,11 +37,26 @@ pick <- function(rdf, target_col, as_char=FALSE) {
 
 ### Parse from raw data
 
-#### Setup design
+#### Setup sampling
 
 ```{r}
 design_seq_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat_seq.xlsx") %>% janitor::clean_names()
 design_pat_df <- openxlsx::read.xlsx("data/GTEx_pancreas_liver_images_liverfat_pancreasfat.xlsx")
+
+validation_samples <- sample(nrow(design_seq_df), replace=FALSE, size = 20)
+
+design_seq_df$is_validation_sample <- seq_len(nrow(design_seq_df)) %in% validation_samples
+
+design_seq_df
+
+write.xlsx(design_seq_df, file = "data/design_seq_w_valid.xlsx")
+
+```
+
+#### Setup design
+
+```{r}
+design_seq_df <- openxlsx::read.xlsx("data/design_seq_w_valid.xlsx")
 
 pancreas_cols <- colnames(design_seq_df[grepl("_pancreas$", colnames(design_seq_df))])
 liver_cols <- colnames(design_seq_df[grepl("_liver$", colnames(design_seq_df))])
@@ -51,22 +66,26 @@ non_tissue_design_data <- design_seq_df[, !(colnames(design_seq_df) %in% c(pancr
   mutate(id=paste("patient", seq_len(n()), sep="_")) %>% 
   dplyr::select(id, everything())
 
-pancreas_design_all <- cbind(non_tissue_design_data, design_seq_df[, pancreas_cols] %>% 
-                           `colnames<-`(tissue_cols_names) %>% 
-                           mutate(source="pancreas"))
-liver_design_all <- cbind(non_tissue_design_data, design_seq_df[, liver_cols] %>% 
-                        `colnames<-`(tissue_cols_names) %>% 
-                        mutate(source="liver"))
+pancreas_design_distinct <- cbind(
+  non_tissue_design_data, 
+  design_seq_df[, pancreas_cols] %>% 
+    `colnames<-`(tissue_cols_names) %>% mutate(source="pancreas")) %>% 
+  distinct(sampid, .keep_all=TRUE) %>%
+  mutate(over_median_fat = fat_percentage > median(fat_percentage))
 
+liver_design_distinct <- cbind(
+  non_tissue_design_data, design_seq_df[, liver_cols] %>% 
+    `colnames<-`(tissue_cols_names) %>% 
+    mutate(source="liver")) %>%
+  distinct(sampid, .keep_all=TRUE) %>%
+  mutate(over_median_fat = fat_percentage > median(fat_percentage))
 
-pancreas_design_all
+duplicated(pancreas_design_distinct$sampid)
+duplicated(liver_design_distinct$sampid)
 
-ddf <- rbind(
-  pancreas_design_all %>% distinct(sampid, .keep_all=TRUE),
-  liver_design_all %>% distinct(sampid, .keep_all=TRUE)
-)
+ddf <- rbind(pancreas_design_distinct, liver_design_distinct)
 
-ddf
+message("Any duplicated samples present: ", all(duplicated(ddf$sampid)))
 
 write_tsv(ddf, path="data/count_matrix_target_subset.design.tsv")
 ```
@@ -80,7 +99,7 @@ raw_df <- read_tsv("data/GTEx_Analysis_2017-06-05_v8_RNASeQCv1.1.9_gene_reads.gc
 length(unique(ddf$SAMPID))
 length(ddf$SAMPID)
 
-rdf <- raw_df %>% dplyr::select(Name, Description, any_of(ddf$SAMPID))
+rdf <- raw_df %>% dplyr::select(Name, Description, any_of(ddf$sampid))
 write_tsv(rdf, path = "data/count_matrix_target_subset.tsv.gz")
 
 ```
@@ -89,7 +108,9 @@ write_tsv(rdf, path = "data/count_matrix_target_subset.tsv.gz")
 
 ```{r}
 rdf <- read_tsv("data/count_matrix_target_subset.tsv.gz")
-ddf_all <- read_tsv("data/count_matrix_target_subset.design.tsv")
+ddf_all <- read_tsv("data/count_matrix_target_subset.design.tsv") %>% arrange(sampid)
+
+ddf_all
 
 ddf <- ddf_all %>% filter(sampid %in% colnames(rdf))
 
@@ -121,27 +142,13 @@ message("Of these, how many are missing simultaneously in both?")
 table(present_in_liver | present_in_pancreas)
 ```
 
-# Putting fat thresholds
-
-```{r}
-pancreas_cut <- 20
-liver_cut <- 25
-
-liver_median <- ddf_all %>% dplyr::filter(source == "liver") %>% pick(fat_percentage) %>% median()
-pancreas_median <- ddf_all %>% dplyr::filter(source == "pancreas") %>% pick(fat_percentage) %>% median()
-
-ddf_all$over_median_fat <- rbind(ddf_all %>% dplyr::filter(source == "liver"))
-
-# ddf_all %>% ggplot(aes(x=fat_percentage)) + geom_histogram(bins=100) + facet_grid(source~.)
-```
-
 # DESeq2 analysis
 
 ## Utility functions
 
 ```{r}
 make_deseq_data <- function(rdf, sample_cols) {
-  sdf_dataframe <- rdf %>% dplyr::select(all_of(sorted(sample_cols))) %>% as.data.frame()
+  sdf_dataframe <- rdf %>% dplyr::select(all_of(sort(sample_cols))) %>% as.data.frame()
   rownames(sdf_dataframe) <- rdf$Name
   sdf_dataframe
 }
@@ -154,37 +161,93 @@ make_deseq_design <- function (ddf_raw, sample_col) {
 }
 ```
 
-
 ```{r}
-ddf_dataframe
+ddf$tissue_highfat <- paste(ddf$source, ddf$over_median_fat, sep="_")
 
+ddf_dataframe <- make_deseq_design(ddf, "sampid")
+sdf_dataframe <- make_deseq_data(rdf, rownames(ddf_dataframe))
 
 dds <- DESeqDataSetFromMatrix(
   countData = sdf_dataframe,
   colData = ddf_dataframe,
-  design = ~source + sex
+  design = ~tissue_highfat
 )
 
 dds_out <- DESeq(dds)
 
 resultsNames(dds_out)
 
+res_liver <- results(dds_out, contrast=c("tissue_highfat", "liver_TRUE", "liver_FALSE"))
+res_liver_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "liver_TRUE", "liver_FALSE"), res=res_liver, type="apeglm")
+
+res_pancreas <- results(dds_out, contrast=c("tissue_highfat", "pancreas_TRUE", "pancreas_FALSE"))
+res_pancreas_shrunk <- lfcShrink(dds_out, contrast=c("tissue_highfat", "pancreas_TRUE", "pancreas_FALSE"), res=res_pancreas, type="apeglm")
+```
+
+## Writing results prepared for OmicLoupe
+
+```{r}
+vsd <- vst(dds_out, blind=FALSE)
+
+adf <- rdf %>% dplyr::select(c("Name", "Description"))
+sdf <- rdf %>% dplyr::select(-one_of(c("Name", "Description")))
+
+out_rdf <- cbind(
+  adf,
+  res_liver %>% data.frame() %>% rename_all(funs(paste("liver", colnames(res_liver), sep="."))),
+  res_liver_shrunk %>% data.frame() %>% rename_all(funs(paste("liver_shrunk", colnames(res_liver), sep="."))),
+  res_pancreas %>% data.frame() %>% rename_all(funs(paste("panc", colnames(res_liver), sep="."))),
+  res_pancreas_shrunk %>% data.frame() %>% rename_all(funs(paste("panc_shrunk", colnames(res_liver), sep="."))),
+  assay(vsd)
+)
+
+dir.create("output")
+write_tsv(out_rdf, path = "output/out_rdf.tsv")
+
+set.seed(37)
+write_tsv(out_rdf %>% sample_n(1000, replace = FALSE), path = "output/out_rdf_1000.tsv")
+write_tsv(out_rdf %>% sample_n(5000, replace = FALSE), path = "output/out_rdf_5000.tsv")
+write_tsv(out_rdf, path = "output/out_rdf.tsv")
+write_tsv(ddf %>% dplyr::select(sampid, everything()), path = "output/out_rdf.design.tsv")
+
+out_rdf
+```
+
+# Explorative visuals
+
+```{r}
+res_liver
+
+phist_liv <- res_liver %>% data.frame() %>%
+  ggplot(aes(x=pvalue)) + geom_histogram(bins=100)
+
+phist_panc <- res_pancreas %>% data.frame() %>%
+  ggplot(aes(x=pvalue)) + geom_histogram(bins=100)
+
+ggsave(phist_liv, filename = "output/phist_liv.png")
+ggsave(phist_panc, filename = "output/phist_panc.png")
+
+res_liver_shrunk %>% data.frame() %>%
+  ggplot(aes(x=pvalue)) + geom_histogram(bins=100)
+
+res_pancreas_shrunk %>% data.frame() %>%
+  ggplot(aes(x=pvalue)) + geom_histogram(bins=100)
 
 
-
-res_panc_liver <- results(dds_out, name="source_pancreas_vs_liver")
-res_sex <- results(dds_out, name="sex_male_vs_female")
-
-res_panc_liver
-
-res_panc_liver %>% data.frame() %>% ggplot(aes(x=pvalue)) + geom_histogram(bins=100, na.rm = TRUE)
-res_sex %>% data.frame() %>% ggplot(aes(x=pvalue)) + geom_histogram(bins=100, na.rm = TRUE)
-res %>% data.frame() %>% filter(padj < 0.05)
 ```
 
 
 
+```{r}
 
+pca_out <- plotPCA(vsd, intgroup=c("tissue_highfat"))
+dir.create("output")
+
+ggsave(pca_out, filename = "output/pca.png")
+plotPCA(vsd, intgroup=c("tissue_highfat"), object)
+
+?plotPCA
+```
 
 
 
