@@ -58,6 +58,9 @@ write.xlsx(design_seq_df, file = "data/design_seq_w_valid.xlsx")
 ```{r}
 design_seq_df <- openxlsx::read.xlsx("data/design_seq_w_valid.xlsx")
 
+cor(design_seq_df$fat_percentage_liver, design_seq_df$fat_percentage_pancreas)
+cor.test(design_seq_df$fat_percentage_liver, design_seq_df$fat_percentage_pancreas)
+
 pancreas_cols <- colnames(design_seq_df[grepl("_pancreas$", colnames(design_seq_df))])
 liver_cols <- colnames(design_seq_df[grepl("_liver$", colnames(design_seq_df))])
 tissue_cols_names <- pancreas_cols %>% gsub("_pancreas", "", .)
@@ -172,7 +175,8 @@ make_deseq_design <- function (ddf_raw, sample_col) {
 
 ```{r}
 ddf$tissue_highfat <- paste(ddf$source, ddf$over_fat_cutoff, sep="_")
-ddf_dataframe <- make_deseq_design(ddf %>% filter(!is_validation_sample), "sampid")
+ddf_dataframe <- make_deseq_design(ddf, "sampid")
+# ddf_dataframe <- make_deseq_design(ddf %>% filter(!is_validation_sample), "sampid")
 sdf_dataframe <- make_deseq_data(rdf, rownames(ddf_dataframe))
 
 dds <- DESeqDataSetFromMatrix(
@@ -221,8 +225,12 @@ out_rdf <- cbind(
   assay(vsd)
 )
 
+table(is.na(adf$Annot))
+nrow(adf)
+
 dir.create("output")
 write_tsv(out_rdf, path = "output/out_rdf.tsv")
+
 
 set.seed(37)
 write_tsv(out_rdf %>% sample_n(1000, replace = FALSE), path = "output/out_rdf_1000.tsv")
@@ -243,7 +251,8 @@ out_rdf
 liver_shortlist <- out_rdf %>% dplyr::filter(liver.padj < 0.05 & abs(liver.log2FoldChange) > 1) %>% arrange(liver.pvalue)
 panc_shortlist <- out_rdf %>% dplyr::filter(panc.padj < 0.05 & abs(panc.log2FoldChange) > 1) %>% arrange(panc.pvalue)
 
-liver_shortlist
+liver_shortlist %>% nrow()
+panc_shortlist %>% nrow()
 
 write_tsv(liver_shortlist, path = "output/liver_shortlist.tsv")
 write_tsv(panc_shortlist, path = "output/panc_shortlist.tsv")
@@ -274,25 +283,41 @@ res_pancreas_shrunk %>% data.frame() %>%
 
 ```
 
+# Preparing matrices for machine learning
 
+* Select for significant and lowly correlated features using the caret findCorrelation
+* Properly parse the two different data frames
 
 ```{r}
+liver_ids <- ddf %>% dplyr::filter(source == "liver") %>% pull(sampid)
+pancreas_ids <- ddf %>% dplyr::filter(source == "pancreas") %>% pull(sampid)
 
-pca_out <- plotPCA(vsd, intgroup=c("tissue_highfat"))
-dir.create("output")
 
-ggsave(pca_out, filename = "output/pca.png")
-plotPCA(vsd, intgroup=c("tissue_highfat"), object)
+setup_transcript_matrix_for_ml <- function(shortlist_rdf, target_ids, cor_thres=0.5) {
+  sdf <- shortlist_rdf %>% dplyr::select(all_of(target_ids))
+  corr_matrix <- cor(sdf)
+  highly_corr <- findCorrelation(corr_matrix, cutoff=cor_thres)
+  low_corr <- sdf[-highly_corr, ]
+  low_corr_t <- low_corr %>% 
+    t() %>% 
+    data.frame() %>% 
+    rownames_to_column("rows")
+  colnames(low_corr_t) <- c("rows", shortlist_rdf$Description[-highly_corr])
+  low_corr_t
+}
 
-?plotPCA
+liver_transcript_ddf <- setup_transcript_matrix_for_ml(liver_shortlist, liver_ids, cor_thres=0.5)
+panc_transcript_ddf <- setup_transcript_matrix_for_ml(panc_shortlist, pancreas_ids)
+
+message("All IDs in the transcript ddfs should match the ddf to be bound to, otherwise problems! All matching: ", all(liver_transcript_ddf$rows == ddf %>% dplyr::filter(source == "liver") %>% pull(sampid)))
+message("All IDs in the transcript ddfs should match the ddf to be bound to, otherwise problems! All matching: ", all(panc_transcript_ddf$rows == ddf %>% dplyr::filter(source == "pancreas") %>% pull(sampid)))
+
+liver_out <- cbind(ddf %>% dplyr::filter(source == "liver"), liver_transcript_ddf)
+pancreas_out <- cbind(ddf %>% dplyr::filter(source == "pancreas"), panc_transcript_ddf)
+
+write_tsv(liver_out, path = "output/liver_design_to_ml.tsv")
+write_tsv(pancreas_out, path = "output/pancreas_design_to_ml.tsv")
 ```
-
-
-
-
-
-
-
 
 
 
