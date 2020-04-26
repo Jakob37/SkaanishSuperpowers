@@ -14,72 +14,60 @@ library("caret")
 
 
 ```{r}
-dt1 <- readxl::read_xlsx("GTEx_pancreas_liver_images_liverfat_pancreasfat.xlsx")
+liver_raw <- read_tsv("../liver_design_to_ml.tsv")
+panc_raw <- read_tsv("../pancreas_design_to_ml.tsv")
 ```
 
 
-```{r}
-head(dt1)
-```
-
 
 ```{r}
-panc_path <- lapply(dt1$Pathology.Categories_pancreas, function(x) {
+panc_path <- lapply(panc_raw$pathology_categories, function(x) {
   unlist(str_split(x, ", ")) }) %>% unlist() %>% unique() %>% subset(!is.na(.))
 panc_categories_wide <- sapply(panc_path, function(x) {
-  grepl(x, dt1$Pathology.Categories_pancreas)
+  grepl(x, panc_raw$pathology_categories)
   }) %>%
   as.data.frame() %>%
   rename_all(., function(x) paste(x, "pancreas", sep = "_"))
 
-liver_path <- lapply(dt1$Pathology.Categories_liver, function(x) {
+apply(panc_categories_wide, 2, table)
+
+liver_path <- lapply(liver_raw$pathology_categories, function(x) {
   unlist(str_split(x, ", ")) }) %>% unlist() %>% unique() %>% subset(!is.na(.))
 liver_categories_wide <- sapply(liver_path, function(x) {
-  grepl(x, dt1$Pathology.Categories_liver)
+  grepl(x, liver_raw$pathology_categories)
   }) %>%
   as.data.frame() %>%
   rename_all(., function(x) paste(x, "liver", sep = "_"))
+
+apply(liver_categories_wide, 2, table)
 ```
 
 
 ```{r}
-dt1_pathology_wide <- bind_cols(dt1,
-                                panc_categories_wide,
-                                liver_categories_wide)
-```
-
-
-```{r}
-apply(panc_categories_wide, 2, table)
-panc_dt <- dt1 %>%
-  select(!contains("liver")) %>%
-  select(-c("Subject.ID",
-            "Tissue.Sample.ID_pancreas",
-            "Pathology.Categories_pancreas",
-            "Pathology.Notes_pancreas")) %>%
-  bind_cols(panc_categories_wide[, c("saponification_pancreas",
-                                     "atrophy_pancreas",
-                                     "fibrosis_pancreas")]) %>%
-  mutate(high_fat = Fat.Percentage_pancreas > median(Fat.Percentage_pancreas))
+panc_dt <- panc_raw %>%
+  select(-c("id", "subject_id", "is_validation_sample", "tissue_sample_id", "pathology_categories",
+            "pathology_notes", "sampid", "smts", "smpthnts", "fat_percentage", "source",
+            "tissue_highfat", "rows"))
+#  bind_cols(panc_categories_wide[, c("saponification_pancreas",
+#                                     "atrophy_pancreas",
+#                                     "fibrosis_pancreas")])
 ```
 
 
 ```{r}
 apply(liver_categories_wide, 2, table)
-liver_dt <- dt1 %>%
-  select(!contains("pancreas")) %>%
-  select(-c("Subject.ID",
-            "Tissue.Sample.ID_liver",
-            "Pathology.Categories_liver",
-            "Pathology.Notes_liver")) %>%
-  bind_cols(liver_categories_wide[, c("necrosis_liver",
+liver_dt <- liver_raw %>%
+  select(-c("id", "subject_id", "is_validation_sample", "tissue_sample_id", "pathology_categories",
+            "pathology_notes", "sampid", "smts", "smpthnts", "fat_percentage", "source",
+            "tissue_highfat", "rows")) %>%
+  bind_cols(liver_categories_wide[, c(#"necrosis_liver",
                                       "congestion_liver",
                                       "fibrosis_liver",
-                                      "inflammation_liver",
-                                      "steatosis_liver",
-                                      "cirrhosis_liver",
-                                      "hepatitis_liver")]) %>%
-  mutate(high_fat = Fat.Percentage_liver > median(Fat.Percentage_liver))
+                                      #"inflammation_liver",
+                                      "steatosis_liver")])
+                                      #"cirrhosis_liver",
+                                      #"hepatitis_liver")]) %>%
+#  mutate(high_fat = Fat.Percentage_liver > median(Fat.Percentage_liver))
 ```
 
 
@@ -88,12 +76,11 @@ liver_dt <- dt1 %>%
 
 
 ```{r}
-panc_x <- panc_dt %>% select(-Fat.Percentage_pancreas, -high_fat) %>%
-  mutate_all(as.factor) %>% as.data.frame()
-panc_y_perc <- panc_dt %>% pull(Fat.Percentage_pancreas)
-panc_y_grp <- panc_dt %>% pull(high_fat)
+panc_x <- panc_dt %>% select(-over_fat_cutoff) %>% as.data.frame() %>%
+  mutate_if(is.character, factor) %>%
+  mutate_if(is.logical, factor)
+panc_y_grp <- panc_dt %>% pull(over_fat_cutoff)
 
-summary(panc_y_perc)
 table(panc_y_grp)
 ```
 
@@ -127,6 +114,23 @@ trainIndex <- caret::createDataPartition(factor(panc_y_grp),
 # 
 # postResample(pred = test_pred, obs = test_y)
 ```
+
+
+```{r}
+iris2 <- iris %>%
+  mutate(new_grp = rep(c("a", "b", "c", "d", "e"), 30)) %>%
+  mutate_at("new_grp", factor) %>% 
+  select(new_grp, everything())
+
+set.seed(100)
+mod <- train(iris2[, 1:5],
+             iris2[,6])
+                  #   method = "rf",  # Random forest
+             #        trainControl = tr_ctrl)
+
+
+```
+
 
 
 ### Pancreas fat group as response
@@ -181,7 +185,6 @@ gbmImp
 ```
 
 
-
 ```{r}
 set.seed(102)
 panc_bart_machine <- bartMachine(panc_train_x, panc_train_y)
@@ -197,7 +200,7 @@ var_imp_bart <- investigate_var_importance(bart_machine, num_replicates_for_avg 
 
 
 ```{r}
-plot(panc_rf_roc, col = "green", main = "ROC curves: Panc fat pred by metadata")
+plot(panc_rf_roc, col = "green", main = "ROC curves: Panc fat pred by metadata and transcripts")
 lines(panc_tb_crv_roc, col = "hotpink")
 lines(panc_bart_roc, col = "orange")
 
@@ -215,12 +218,13 @@ legend("bottomright",
 
 
 ```{r}
-liver_x <- liver_dt %>% select(-Fat.Percentage_liver, -high_fat) %>%
-  mutate_all(as.factor) %>% as.data.frame()
-liver_y_perc <- liver_dt %>% pull(Fat.Percentage_liver)
-liver_y_grp <- liver_dt %>% pull(high_fat)
+liver_x <- liver_dt %>% select(-over_fat_cutoff) %>% as.data.frame() %>%
+  mutate_if(is.character, factor) %>%
+  mutate_if(is.logical, factor)
+#liver_y_perc <- liver_dt %>% pull(Fat.Percentage_liver)
+liver_y_grp <- liver_dt %>% pull(over_fat_cutoff)
 
-summary(liver_y_perc)
+#summary(liver_y_perc)
 table(liver_y_grp)
 ```
 
@@ -284,7 +288,28 @@ liver_rf_roc <- pROC::roc(predictor = liver_test_pred,
           response = liver_test_y)
 
 gbmImp <- varImp(liver_rf_crv, scale = FALSE)
-gbmImp
+tmp <- gbmImp[[1]]
+tmp$name <- row.names(tmp)
+tmp <- tmp[order(-tmp$Overall),]
+tmp$name <- NULL
+tmp <- tmp[1:20, ]
+
+a <- tmp[1:20, ]
+
+ggplot(a) +
+  geom_point(aes(x = reorder(name, Overall), y = Overall), color = "blue") +
+  geom_segment(aes(x = name, xend = name,
+                   y = 0, yend = Overall)) +
+  geom_point(aes(x = name, y = Overall), color = "blue") +
+  coord_flip() +
+  theme_classic() +
+  xlab("features") + ylab("importance") +
+  ggtitle("Feature importance top 20 - RF")
+
+scatterplot(a$Overall, a$name)
+
+gbmImp[[1]] <- tmp
+
 plot(gbmImp, main = "Feature importance - random forest")
 ```
 
@@ -324,7 +349,7 @@ var_imp_bart <- investigate_var_importance(bart_machine, num_replicates_for_avg 
 
 
 ```{r}
-plot(liver_rf_roc, col = "green", main = "ROC curves: Liver fat pred by metadata")
+plot(liver_rf_roc, col = "green", main = "ROC curves: Liver fat pred by metadata and transcripts")
 lines(liver_tb_crv_roc, col = "hotpink")
 lines(liver_bart_roc, col = "orange")
 
